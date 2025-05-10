@@ -1,0 +1,125 @@
+import discord
+from discord.ext import commands
+from discord import ui
+import os
+from datetime import datetime
+
+intents = discord.Intents.all()
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+# ==== CONFIGURATION SECTION ====
+TOKEN = "$"
+SUPPORT_ROLE_ID = 1369973355645505536  # Replace with your role ID
+TICKET_CATEGORY_ID = 1369979771458686986  # Replace with your category ID
+TRANSCRIPT_CHANNEL_ID = 1369984358584287264  # Replace with your transcript channel ID
+GUILD_ID = 1369767751488639068  # Replace with your guild ID
+
+TICKET_IMAGE_URL = "https://cdn.discordapp.com/attachments/1369968533097676840/1369972333850394735/image0.png?ex=681dcda9&is=681c7c29&hm=2fe909c18f996f5de883df09f073e1b1781873395367076bad740c6a4e4525c3&"
+# ================================
+
+active_claims = {}
+
+class TicketButtons(ui.View):
+    def __init__(self, user: discord.Member):
+        super().__init__(timeout=None)
+        self.user = user
+        self.claimed_by = None
+
+    @ui.button(label="Call Support", style=discord.ButtonStyle.danger)
+    async def call_support(self, interaction: discord.Interaction, button: discord.ui.Button):
+        role = interaction.guild.get_role(SUPPORT_ROLE_ID)
+        await interaction.response.send_message(f"{role.mention}, support requested!", ephemeral=False)
+
+    @ui.button(label="Claim", style=discord.ButtonStyle.success, custom_id="claim_btn")
+    async def claim(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.claimed_by is None:
+            self.claimed_by = interaction.user
+            button.label = "Unclaim"
+            button.style = discord.ButtonStyle.secondary
+            await interaction.response.edit_message(
+                embed=discord.Embed(description=f"The ticket has been claimed by {self.claimed_by.mention}", color=discord.Color.light_grey()),
+                view=self
+            )
+        else:
+            if interaction.user != self.claimed_by:
+                await interaction.response.send_message("Only the claimer can unclaim.", ephemeral=True)
+                return
+            button.label = "Claim"
+            button.style = discord.ButtonStyle.success
+            await interaction.response.edit_message(
+                embed=discord.Embed(description=f"The ticket has been unclaimed by {self.claimed_by.mention}", color=discord.Color.light_grey()),
+                view=self
+            )
+            self.claimed_by = None
+
+    @ui.button(label="Close", style=discord.ButtonStyle.danger)
+    async def close(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message("Closing ticket and generating transcript...", ephemeral=True)
+        channel = interaction.channel
+        messages = [msg async for msg in channel.history(limit=100, oldest_first=True)]
+        transcript = generate_html_transcript(channel.name, messages)
+
+        transcript_channel = interaction.guild.get_channel(TRANSCRIPT_CHANNEL_ID)
+        await transcript_channel.send(
+            f"Transcript for ticket `{channel.name}` closed by {interaction.user.mention}:",
+            file=discord.File(transcript)
+        )
+
+        await channel.delete()
+
+class TicketCreator(ui.View):
+    @ui.button(label="Help", style=discord.ButtonStyle.grey)
+    async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild = interaction.guild
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, attach_files=True),
+            guild.get_role(SUPPORT_ROLE_ID): discord.PermissionOverwrite(view_channel=True, send_messages=True)
+        }
+
+        ticket_channel = await guild.create_text_channel(
+            name=f"ticket-{interaction.user.name}",
+            category=guild.get_channel(TICKET_CATEGORY_ID),
+            overwrites=overwrites
+        )
+
+        try:
+            await interaction.user.send("Your Ticket was Created Successfully.")
+        except:
+            pass
+
+        embed = discord.Embed(title="Ticket Created", description="Please describe your issue below. Support will be with you shortly.", color=discord.Color.blue())
+        view = TicketButtons(user=interaction.user)
+        await ticket_channel.send(content=interaction.user.mention, embed=embed, view=view)
+        await interaction.response.send_message(f"Ticket created: {ticket_channel.mention}", ephemeral=True)
+
+def generate_html_transcript(channel_name, messages):
+    html = f"""<html>
+<head><title>Transcript - {channel_name}</title></head>
+<body style="font-family: monospace; background-color: #f4f4f4; color: #000;">
+<h2>Transcript - {channel_name}</h2><hr>
+"""
+    for msg in messages:
+        time = msg.created_at.strftime("%Y-%m-%d %H:%M:%S")
+        html += f"<p><b>{msg.author}</b> [{time}]: {msg.clean_content}</p>\n"
+
+    html += "</body></html>"
+    filename = f"transcript_{channel_name}_{datetime.utcnow().timestamp()}.html"
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(html)
+    return filename
+
+@bot.event
+async def on_ready():
+    print(f"Logged in as {bot.user}")
+    synced = await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
+    print(f"Slash commands synced: {len(synced)}")
+
+@bot.tree.command(name="setup_ticket", description="Send the ticket panel", guild=discord.Object(id=GUILD_ID))
+async def setup_ticket(interaction: discord.Interaction):
+    embed = discord.Embed(title="Support Ticket", description="Click the button below to create a support ticket.", color=discord.Color.blue())
+    embed.set_image(url=TICKET_IMAGE_URL)
+    view = TicketCreator()
+    await interaction.response.send_message(embed=embed, view=view)
+
+bot.run(TOKEN)
